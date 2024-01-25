@@ -1,13 +1,13 @@
 {
-  "name": "r2-registry",
+  "name": "mjolnir-registry",
   "version": "1.0.0",
-  "description": "An open-source R2 registry",
+  "description": "mjolnir.tools' registry",
   "main": "index.ts",
   "scripts": {
-    "deploy": "wrangler publish",
-    "dev:miniflare": "cross-env NODE_ENV=development wrangler --env dev dev --port 9999 --live-reload",
+    "deploy": "wrangler deploy",
+    "dev:miniflare": "wrangler dev --live-reload",
     "typecheck": "tsc",
-    "test": "cross-env NODE_OPTIONS=--experimental-vm-modules vitest run"
+    "test": "vitest run"
   },
   "dependencies": {
     "@tsndr/cloudflare-worker-jwt": "^2.5.1",
@@ -23,9 +23,6 @@
     "vitest": "^1.3.1",
     "vitest-environment-miniflare": "^2.14.2",
     "wrangler": "^3.29.0"
-  },
-  "engines": {
-    "node": ">=18"
   },
   "author": "",
   "license": "Apache-2.0"
