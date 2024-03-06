@@ -19,6 +19,7 @@ import {
   FinishedUploadObject,
   GetLayerResponse,
   GetManifestResponse,
+  ListRepositoriesResponse,
   PutManifestResponse,
   Registry,
   RegistryError,
@@ -130,6 +131,101 @@ export class R2Registry implements Registry {
     return checkManifestResponse;
   }
 
+  async listRepositories(limit?: number, last?: string): Promise<RegistryError | ListRepositoriesResponse> {
+    // The idea in listRepositories is list all entries in the R2 bucket and map them to repositories.
+    // We do this by taking advantage of the name format in the R2 bucket:
+    // name format is:
+    //   <path>/<'blobs' | 'manifests'>/<name>
+    // This means we slice the last two items in the key and add them to our hash map.
+    // At the end, we start skipping entries until we find another unique key, then we return that entry as startAfter.
+
+    const options = {
+      limit: limit ?? 1000,
+      startAfter: last ?? undefined,
+    };
+    const repositories: Record<string, {}> = {};
+    let totalRecords = 0;
+    let lastSeen: string | undefined;
+    const objectExistsInPath = (entry: string) => {
+      const parts = entry.split("/");
+      const repository = parts.slice(0, parts.length - 2).join("/");
+      return repository in repositories;
+    };
+
+    const addObjectPath = (object: R2Object) => {
+      // update lastSeen for cursoring purposes
+      lastSeen = object.key;
+      // don't add if seen before
+      if (totalRecords >= options.limit) return;
+      // skip either 'manifests' or 'blobs'
+      // name format is:
+      // <path>/<'blobs' | 'manifests'>/<name>
+      const parts = object.key.split("/");
+      const repository = parts.slice(0, parts.length - 2).join("/");
+      if (!(repository in repositories)) {
+        totalRecords++;
+      }
+
+      repositories[repository] = {};
+    };
+
+    const r2Objects = await this.env.REGISTRY.list({
+      limit: options.limit,
+      startAfter: options.startAfter,
+    });
+    r2Objects.objects.forEach((path) => addObjectPath(path));
+    let cursor = r2Objects.truncated ? r2Objects.cursor : undefined;
+    while (cursor !== undefined && totalRecords < options.limit) {
+      const next = await this.env.REGISTRY.list({
+        limit: options.limit,
+        cursor,
+      });
+      next.objects.forEach((path) => addObjectPath(path));
+      if (next.truncated) {
+        cursor = next.cursor;
+      } else {
+        cursor = undefined;
+      }
+    }
+
+    while (cursor !== undefined && typeof lastSeen === "string" && objectExistsInPath(lastSeen)) {
+      const nextList: R2Objects = await this.env.REGISTRY.list({
+        limit: 1000,
+        cursor,
+      });
+
+      let found = false;
+      // Search for the next object in the list
+      for (const object of nextList.objects) {
+        lastSeen = object.key;
+        if (!objectExistsInPath(lastSeen)) {
+          found = true;
+          break;
+        }
+      }
+
+      if (found) break;
+
+      if (nextList.truncated) {
+        // jump to the next list and try to find a
+        // repository that hasn't been returned in this response
+        cursor = nextList.cursor;
+      } else {
+        // we arrived to the end of the list, no more cursor
+        cursor = undefined;
+      }
+    }
+
+    if (cursor === undefined) {
+      lastSeen = undefined;
+    }
+
+    return {
+      repositories: Object.keys(repositories),
+      cursor: lastSeen,
+    };
+  }
+
   async putManifest(
     name: string,
     reference: string,
@@ -145,30 +241,28 @@ export class R2Registry implements Registry {
     shaWriter.close();
     const digest = await sha256.digest;
     const digestStr = hexToDigest(digest);
-    const [arr1, arr2] = reference === digestStr ? [blob.stream(), blob.stream()] : blob.stream().tee();
+    const text = await blob.text();
     const putReference = async () => {
       // if the reference is the same as a digest, it's not necessary to insert
       if (reference === digestStr) return;
       // TODO: If we're overriding an existing manifest here, should we update the original manifest references?
-      return await env.REGISTRY.put(`${name}/manifests/${reference}`, arr1, {
+      return await env.REGISTRY.put(`${name}/manifests/${reference}`, text, {
         sha256: digest,
         httpMetadata: {
           contentType,
         },
       });
     };
-
-    await Promise.all([
+    await Promise.allSettled([
       putReference(),
       // this is the "main" manifest
-      env.REGISTRY.put(`${name}/manifests/${digestStr}`, arr2, {
+      env.REGISTRY.put(`${name}/manifests/${digestStr}`, text, {
         sha256: digest,
         httpMetadata: {
           contentType,
         },
       }),
     ]);
-
     return {
       digest: hexToDigest(digest),
       location: `/v2/${name}/manifests/${reference}`,

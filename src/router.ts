@@ -25,6 +25,29 @@ v2Router.get("/", async (_req, _env: Env) => {
   return new Response();
 });
 
+v2Router.get("/_catalog", async (req, env: Env) => {
+  const { n, last } = req.query;
+  const response = await env.REGISTRY_CLIENT.listRepositories(
+    n ? parseInt(n?.toString()) : undefined,
+    last?.toString(),
+  );
+  if ("response" in response) {
+    return response.response;
+  }
+
+  const url = new URL(req.url);
+  return new Response(
+    JSON.stringify({
+      repositories: response.repositories,
+    }),
+    {
+      headers: {
+        Link: `${url.protocol}//${url.hostname}${url.pathname}?n=${n ?? 1000}&last=${response.cursor ?? ""}; rel=next`,
+      },
+    },
+  );
+});
+
 v2Router.delete("/:name+/manifests/:reference", async (req, env: Env) => {
   // deleting a manifest works by retrieving the """main""" manifest that its key is a sha,
   // and then going through every tag and removing it
@@ -38,17 +61,17 @@ v2Router.delete("/:name+/manifests/:reference", async (req, env: Env) => {
   //
   // If somehow we need to remove by paginating, we accept a last query param
 
-  const { last } = req.query;
+  const { last, limit } = req.query;
   const { name, reference } = req.params;
   // Reference is ALWAYS a sha256
   const manifest = await env.REGISTRY.head(`${name}/manifests/${reference}`);
   if (manifest === null) {
     return new Response(JSON.stringify(ManifestUnknownError), { status: 404 });
   }
-
+  const limitInt = parseInt(limit?.toString() ?? "1000", 10);
   const tags = await env.REGISTRY.list({
     prefix: `${name}/manifests`,
-    limit: 1000,
+    limit: isNaN(limitInt) ? 1000 : limitInt,
     startAfter: last?.toString(),
   });
   for (const tag of tags.objects) {
@@ -65,7 +88,7 @@ v2Router.delete("/:name+/manifests/:reference", async (req, env: Env) => {
     return new Response(JSON.stringify(ManifestTagsListTooBigError), {
       status: 400,
       headers: {
-        "Link": `${req.url}/last=${tags.objects[tags.objects.length - 1]}; rel=next`,
+        "Link": `${req.url}/?last=${tags.truncated ? tags.cursor : ""}; rel=next`,
         "Content-Type": "application/json",
       },
     });
@@ -173,7 +196,6 @@ v2Router.get("/:name+/manifests/:reference", async (req, env: Env, context: Exec
     }
 
     getManifestResponse = response;
-    console.log("Res:", res.response.status);
     if (res.response.status !== 404) {
       // Don't upload the manifest if there is an error
       break;
